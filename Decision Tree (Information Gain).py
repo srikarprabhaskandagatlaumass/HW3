@@ -6,9 +6,10 @@ import random
 import matplotlib.pyplot as plt
 
 # Hyper-parameters
-n_trees = 50
+n_trees_list = [1, 5, 10, 20, 30, 40, 50]  # Different values for ntree parameter
 k_folds = 5
-random_state = 42
+max_depth = 20  # Maximal depth for each tree
+epsilon = 1e-9
 
 # Decision Tree Node
 class DecisionNode:
@@ -20,39 +21,39 @@ class DecisionNode:
 
 # Random Forest Implementation
 class RandomForest:
-    def __init__(self, n_trees=10, k_folds=5, random_state=None, max_depth=5):
+    def __init__(self, n_trees=10, k_folds=5, max_depth=5):
         self.n_trees = n_trees
         self.k_folds = k_folds
-        self.random_state = random_state
-        self.max_depth = max_depth  # New parameter for maximal depth
+        self.max_depth = max_depth  # Maximal depth parameter
         self.trees = []
         self.feature_importances = None
-        if random_state is not None:
-            np.random.seed(random_state)
-            random.seed(random_state)
-    
+
     def entropy(self, sample):
         label_counts = Counter(row[-1] for row in sample)
         total_samples = len(sample)
-        return -sum((count / total_samples) * np.log2(count / total_samples) 
+        return -sum((count / total_samples) * np.log2(count / total_samples)
                     for count in label_counts.values() if count > 0)
-    
+
     def is_numeric(self, value):
         return isinstance(value, (int, float, np.number))
-    
+
     def information_gain(self, sample, available_features, all_features):
         def feature_entropy(feature):
             feature_idx = all_features.index(feature)
             feature_values = [row[feature_idx] for row in sample]
-            
+
             if self.is_numeric(feature_values[0]):
-                threshold = np.mean(feature_values)
+                # Check if feature_values is not empty
+                if feature_values:
+                    threshold = np.nanmean(feature_values)
+                else:
+                    threshold = 0  # Provide a default value
                 left_subset = [row for row in sample if row[feature_idx] <= threshold]
                 right_subset = [row for row in sample if row[feature_idx] > threshold]
-                
+
                 if not left_subset or not right_subset:
                     return 0
-                
+
                 weighted_entropy = (len(left_subset)/len(sample)) * self.entropy(left_subset) + \
                                   (len(right_subset)/len(sample)) * self.entropy(right_subset)
                 return self.entropy(sample) - weighted_entropy
@@ -64,264 +65,341 @@ class RandomForest:
                     if (subset := [row for row in sample if row[feature_idx] == value])
                 )
                 return self.entropy(sample) - weighted_entropy
-        
+
         return max(available_features, key=feature_entropy)
-    
+
     def create_bootstrap_sample(self, dataset):
         n_samples = len(dataset)
         indices = np.random.choice(n_samples, size=n_samples, replace=True)
         return [dataset[i] for i in indices]
-    
+
     def construct_tree(self, sample, all_features):
-        def _construct_tree(sample, available_features, current_depth=0):  # Add current_depth parameter
+        def _construct_tree(sample, available_features, current_depth=0):
+            # If sample is empty or no features left, return the most common class in parent
+            if not sample:
+                return DecisionNode(category=None)  # Will be handled during prediction
+
             labels = [row[-1] for row in sample]
-            
-            # Stop if max depth reached
-            if current_depth >= self.max_depth:
-                return DecisionNode(category=Counter(labels).most_common(1)[0][0])
-            
-            # Existing stopping conditions
-            if len(set(labels)) == 1:
-                return DecisionNode(category=labels[0])
-            
-            if not available_features:
-                return DecisionNode(category=Counter(labels).most_common(1)[0][0])
-            
+
+            # If all samples have the same class or max depth reached, return a leaf node
+            if len(set(labels)) == 1 or current_depth >= self.max_depth:
+                most_common = Counter(labels).most_common(1)
+                return DecisionNode(category=most_common[0][0] if most_common else None)
+
             # Random feature selection
             m = int(np.sqrt(len(all_features)))
             selected_features = random.sample(available_features, min(m, len(available_features)))
-            
+
+            # If no features provide information gain, return leaf node
+            if not selected_features:
+                most_common = Counter(labels).most_common(1)
+                return DecisionNode(category=most_common[0][0] if most_common else None)
+
             best_feature = self.information_gain(sample, selected_features, all_features)
             root = DecisionNode(feature=best_feature)
-            
+
             feature_idx = all_features.index(best_feature)
             feature_values = [row[feature_idx] for row in sample]
-            
+
             if self.is_numeric(feature_values[0]):
-                threshold = np.mean(feature_values)
+                if feature_values:  # Check if feature_values is not empty
+                    threshold = np.nanmean(feature_values)
+                else:
+                    # Handle the case where feature_values is empty
+                    threshold = 0  # Or some other appropriate default value
                 root.threshold = threshold
-                
+
                 left_subset = [row for row in sample if row[feature_idx] <= threshold]
                 right_subset = [row for row in sample if row[feature_idx] > threshold]
-                
+
                 remaining_features = [f for f in available_features if f != best_feature]
-                
-                if left_subset:
-                    root.descendants['left'] = _construct_tree(left_subset, remaining_features, current_depth+1)
-                else:
-                    root.descendants['left'] = DecisionNode(category=Counter(labels).most_common(1)[0][0])
-                    
-                if right_subset:
-                    root.descendants['right'] = _construct_tree(right_subset, remaining_features, current_depth+1)
-                else:
-                    root.descendants['right'] = DecisionNode(category=Counter(labels).most_common(1)[0][0])
+
+                root.descendants['left'] = _construct_tree(left_subset, remaining_features, current_depth+1)
+                root.descendants['right'] = _construct_tree(right_subset, remaining_features, current_depth+1)
             else:
                 for value in set(feature_values):
                     subset = [row for row in sample if row[feature_idx] == value]
-                    if subset:
-                        remaining_features = [f for f in available_features if f != best_feature]
-                        root.descendants[value] = _construct_tree(subset, remaining_features, current_depth+1)
-                    else:
-                        root.descendants[value] = DecisionNode(category=Counter(labels).most_common(1)[0][0])
-            
+                    remaining_features = [f for f in available_features if f != best_feature]
+                    root.descendants[value] = _construct_tree(subset, remaining_features, current_depth+1)
             return root
-        
-        return _construct_tree(sample, all_features.copy(), 0)  # Start with depth 0
-    
+
+        return _construct_tree(sample, all_features, 0)
+
     def classify_sample(self, tree, sample, features):
         if tree.category is not None:
             return tree.category
-        
+
+        if tree.feature is None:
+            # Return default class (majority class from training data) when undecided.
+            return None
+
         feature_value = sample[features.index(tree.feature)]
-        
+
         if tree.threshold is not None:
-            if feature_value <= tree.threshold:
-                direction = 'left'
-            else:
-                direction = 'right'
-            
+            direction = 'left' if feature_value <= tree.threshold else 'right'
+
             if direction in tree.descendants:
                 return self.classify_sample(tree.descendants[direction], sample, features)
-            else:
-                if tree.descendants:
-                    return self.classify_sample(next(iter(tree.descendants.values())), sample, features)
-                else:
-                    return None
-        else:
-            if feature_value not in tree.descendants:
-                descendant_categories = [d.category for d in tree.descendants.values() if d.category]
-                return Counter(descendant_categories).most_common(1)[0][0] if descendant_categories else \
-                       self.classify_sample(next(iter(tree.descendants.values())), sample, features)
-            
+
+        elif feature_value in tree.descendants:
             return self.classify_sample(tree.descendants[feature_value], sample, features)
-    
+
+        # Default fallback: majority vote among descendants' categories.
+        descendant_categories = [
+            self.classify_sample(descendant, sample, features)
+            for descendant in tree.descendants.values()
+        ]
+
+        valid_categories = [cat for cat in descendant_categories if cat is not None]
+        if valid_categories:
+            return Counter(valid_categories).most_common(1)[0][0]
+        else:
+            return None
+
     def majority_vote(self, predictions):
-        return Counter(predictions).most_common(1)[0][0]
-    
+        valid_predictions = [p for p in predictions if p is not None]
+        if valid_predictions:
+            return Counter(valid_predictions).most_common(1)[0][0]
+        else:
+            return None
+
     def stratified_kfold_split(self, X, y, k):
-        # Combine X and y for easier handling
         data = np.column_stack((X, y))
-        
-        # Get unique classes and their counts
         unique_classes, class_counts = np.unique(y, return_counts=True)
         class_indices = {cls: np.where(y == cls)[0] for cls in unique_classes}
-        
-        # Initialize folds
+
         folds = [[] for _ in range(k)]
-        
-        # Distribute samples from each class to folds
+
         for cls in unique_classes:
             indices = class_indices[cls]
-            np.random.shuffle(indices)
-            
-            # Calculate how many samples go to each fold
+            random.shuffle(indices)
+
             samples_per_fold = len(indices) // k
             remainder = len(indices) % k
-            
+
             start = 0
             for i in range(k):
                 end = start + samples_per_fold + (1 if i < remainder else 0)
                 fold_indices = indices[start:end]
                 folds[i].extend(data[fold_indices])
                 start = end
-        
-        # Convert each fold to numpy array and split into train/test
+
         for i in range(k):
             test_data = np.array(folds[i])
             train_data = np.concatenate([np.array(fold) for j, fold in enumerate(folds) if j != i])
-            
+
             X_train, y_train = train_data[:, :-1], train_data[:, -1]
             X_test, y_test = test_data[:, :-1], test_data[:, -1]
-            
+
             yield X_train, X_test, y_train, y_test
-    
+
     def fit(self, X, y, features):
-        # Convert to list of lists for easier handling
         dataset = [list(X[i]) + [y[i]] for i in range(len(X))]
-        
-        # Build the forest
         self.trees = []
         for _ in range(self.n_trees):
             bootstrap_sample = self.create_bootstrap_sample(dataset)
             tree = self.construct_tree(bootstrap_sample, features)
             self.trees.append(tree)
-        
-        # Calculate feature importances (optional)
+
         self._calculate_feature_importances(dataset, features)
-    
+
     def _calculate_feature_importances(self, dataset, features):
         self.feature_importances = {f: 0 for f in features}
-        
+        total_samples = len(dataset)
         for tree in self.trees:
-            self._update_feature_importance(tree, dataset, features)
-        
-        # Normalize importances
+            self._update_feature_importance(tree, dataset, features, total_samples)
+
         total = sum(self.feature_importances.values())
         if total > 0:
             for f in self.feature_importances:
                 self.feature_importances[f] /= total
-    
-    def _update_feature_importance(self, node, dataset, features, depth=1):
+
+    def _update_feature_importance(self, node, dataset, features, total_samples, impurity_reduction=0.0):
         if node.feature is not None:
-            self.feature_importances[node.feature] += depth * len(dataset)
-            
+            # Calculate impurity reduction (example using variance reduction)
+            if len(dataset) > 0:
+                labels = [row[-1] for row in dataset]
+                original_variance = np.var(labels)
+            else:
+                original_variance = 0.0
+
             feature_idx = features.index(node.feature)
             if node.threshold is not None:
                 left_subset = [row for row in dataset if row[feature_idx] <= node.threshold]
                 right_subset = [row for row in dataset if row[feature_idx] > node.threshold]
-                
+
+                left_variance = np.var([row[-1] for row in left_subset]) if left_subset else 0.0
+                right_variance = np.var([row[-1] for row in right_subset]) if right_subset else 0.0
+
+                weighted_variance = (len(left_subset) / len(dataset)) * left_variance + \
+                                    (len(right_subset) / len(dataset)) * right_variance
+                impurity_reduction = original_variance - weighted_variance
+
                 if 'left' in node.descendants and left_subset:
-                    self._update_feature_importance(node.descendants['left'], left_subset, features, depth+1)
+                    self._update_feature_importance(node.descendants['left'], left_subset, features, total_samples,
+                                                     impurity_reduction)
                 if 'right' in node.descendants and right_subset:
-                    self._update_feature_importance(node.descendants['right'], right_subset, features, depth+1)
+                    self._update_feature_importance(node.descendants['right'], right_subset, features,
+                                                     total_samples, impurity_reduction)
             else:
                 for value, child_node in node.descendants.items():
                     subset = [row for row in dataset if row[feature_idx] == value]
                     if subset:
-                        self._update_feature_importance(child_node, subset, features, depth+1)
-    
+                        self._update_feature_importance(child_node, subset, features, total_samples,
+                                                         impurity_reduction)
+
+            # Accumulate the impurity reduction to the feature
+            self.feature_importances[node.feature] += impurity_reduction
+
     def predict(self, X, features):
         predictions = []
         for sample in X:
             tree_predictions = [self.classify_sample(tree, sample, features) for tree in self.trees]
             predictions.append(self.majority_vote(tree_predictions))
         return predictions
-    
+
+    def calculate_accuracy(self, y_true, y_pred):
+        correct = sum(1 for true, pred in zip(y_true, y_pred) if true == pred)
+        return correct / len(y_true)
+
+    def calculate_precision(self, y_true, y_pred, positive_class):
+        true_positives = sum(1 for true, pred in zip(y_true, y_pred) if true == positive_class and pred == positive_class)
+        predicted_positives = sum(1 for pred in y_pred if pred == positive_class)
+        return true_positives / (predicted_positives + epsilon)
+
+    def calculate_recall(self, y_true, y_pred, positive_class):
+        true_positives = sum(1 for true, pred in zip(y_true, y_pred) if true == positive_class and pred == positive_class)
+        actual_positives = sum(1 for true in y_true if true == positive_class)
+        return true_positives / (actual_positives + epsilon)
+
+    def calculate_f1_score(self, y_true, y_pred, positive_class):
+        precision = self.calculate_precision(y_true, y_pred, positive_class)
+        recall = self.calculate_recall(y_true, y_pred, positive_class)
+        return 2 * (precision * recall) / (precision + recall + epsilon)
+
     def evaluate(self, X, y, features):
         predictions = self.predict(X, features)
-        correct = sum(1 for true, pred in zip(y, predictions) if true == pred)
-        return correct / len(y)
 
-# Load and preprocess data
-dataset = pd.read_csv('wdbc.csv', header=None)
-header = dataset.iloc[0].tolist()
-full_data = dataset.iloc[1:].values
+        # Get all unique classes
+        classes = list(set(y))
 
-# Convert numerical columns to float (assuming some columns might be numerical)
-for i in range(full_data.shape[1]):
-    try:
-        full_data[:, i] = full_data[:, i].astype(float)
-    except ValueError:
-        pass  # Leave as string if conversion fails
+        # Calculate metrics for each class
+        precisions = []
+        recalls = []
+        f1_scores = []
 
-X = full_data[:, :-1]
-y = full_data[:, -1]
-features = header[:-1]
+        for cls in classes:
+            precisions.append(self.calculate_precision(y, predictions, cls))
+            recalls.append(self.calculate_recall(y, predictions, cls))
+            f1_scores.append(self.calculate_f1_score(y, predictions, cls))
 
-# Initialize lists to store results
-fold_accuracies = []
-feature_importances = []
+        # Calculate weighted averages
+        class_counts = Counter(y)
+        total_samples = len(y)
 
-# Stratified k-fold cross-validation
-rf = RandomForest(n_trees=n_trees, k_folds=k_folds, random_state=random_state)
-kfold = rf.stratified_kfold_split(X, y, k_folds)
+        weighted_precision = sum(precisions[i] * class_counts[cls] for i, cls in enumerate(classes)) / total_samples
+        weighted_recall = sum(recalls[i] * class_counts[cls] for i, cls in enumerate(classes)) / total_samples
+        weighted_f1 = sum(f1_scores[i] * class_counts[cls] for i, cls in enumerate(classes)) / total_samples
 
-for fold, (X_train, X_test, y_train, y_test) in enumerate(kfold):
-    print(f"\nTraining fold {fold + 1}/{k_folds}...")
-    
-    # Train random forest
-    rf.fit(X_train, y_train, features)
-    
-    # Evaluate on test set
-    accuracy = rf.evaluate(X_test, y_test, features)
-    fold_accuracies.append(accuracy)
-    feature_importances.append(rf.feature_importances)
-    
-    print(f"Fold {fold + 1} accuracy: {accuracy:.4f}")
+        accuracy = self.calculate_accuracy(y, predictions)
 
-# Calculate average performance
-mean_accuracy = np.mean(fold_accuracies)
-std_accuracy = np.std(fold_accuracies)
+        return accuracy, weighted_precision, weighted_recall, weighted_f1
 
-print("\nCross-validation results:")
-print(f"Mean accuracy: {mean_accuracy:.4f}")
-print(f"Standard deviation: {std_accuracy:.4f}")
+# Load and preprocess Titanic data correctly
+def load_dataset(filename):
+    # Read the CSV file
+    df = pd.read_csv(filename)
 
-# Calculate average feature importances
-avg_feature_importance = {}
-for f in features:
-    avg_feature_importance[f] = np.mean([imp[f] for imp in feature_importances])
+    # Convert categorical variables to numerical
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            try:
+                df[col] = df[col].map({val: i for i, val in enumerate(df[col].unique())})
+            except:
+                print(f"Could not convert column {col}")
+                continue
 
-# Plot feature importances
-plt.figure(figsize=(10, 6))
-sorted_features = sorted(avg_feature_importance.items(), key=lambda x: x[1], reverse=True)
-features_sorted = [f[0] for f in sorted_features]
-importances_sorted = [f[1] for f in sorted_features]
-plt.barh(features_sorted, importances_sorted)
-plt.xlabel('Importance')
-plt.ylabel('Feature')
-plt.title('Feature Importances')
-plt.gca().invert_yaxis()
-plt.show()
+    # Handle missing values - fill with median for numerical, mode for categorical
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # For categorical columns (though we've converted the only one)
+            df[col] = df[col].fillna(df[col].mode()[0])
+        else:
+            # For numerical columns
+            df[col] = df[col].fillna(df[col].median())
 
-# Plot accuracy distribution
-plt.figure(figsize=(10, 6))
-plt.hist(fold_accuracies, bins=20, edgecolor='black')
-plt.axvline(mean_accuracy, color='red', linestyle='dashed', linewidth=1, label=f'Mean: {mean_accuracy:.4f}')
-plt.axvline(mean_accuracy + std_accuracy, color='green', linestyle='dotted', linewidth=1, label=f'Mean + Std: {mean_accuracy + std_accuracy:.4f}')
-plt.axvline(mean_accuracy - std_accuracy, color='green', linestyle='dotted', linewidth=1, label=f'Mean - Std: {mean_accuracy - std_accuracy:.4f}')
-plt.xlabel('Accuracy')
-plt.ylabel('Frequency')
-plt.title('Random Forest Accuracy Distribution Across Folds')
+    # Extract features and target
+    X = df.drop('label', axis=1).values
+    y = df['label'].values
+    features = df.drop('label', axis=1).columns.tolist()
+
+    return X, y, features
+
+# Load the Titanic dataset
+X, y, features = load_dataset('titanic.csv')
+
+# Initialize dictionaries to store results
+results = {
+    'accuracy': {ntree: [] for ntree in n_trees_list},
+    'precision': {ntree: [] for ntree in n_trees_list},
+    'recall': {ntree: [] for ntree in n_trees_list},
+    'f1': {ntree: [] for ntree in n_trees_list}
+}
+
+# Create RandomForest instance for generating splits
+splitter = RandomForest(n_trees=n_trees_list[0], k_folds=k_folds,
+                      max_depth=max_depth)
+
+# Stratified k-fold cross-validation for each ntree value
+print(f"\nStarting {k_folds}-fold cross-validation for different ntree values...")
+
+for ntree in n_trees_list:
+    print(f"\nProcessing ntree = {ntree}")
+
+    kfold_generator = splitter.stratified_kfold_split(X, y, k_folds)
+    fold_accuracies = []
+    fold_precisions = []
+    fold_recalls = []
+    fold_f1s = []
+
+    for fold, (X_train, X_test, y_train, y_test) in enumerate(kfold_generator):
+        print(f"  Fold {fold + 1}/{k_folds}", end='\r')
+
+        # Create a NEW RandomForest instance for each fold
+        fold_rf = RandomForest(n_trees=ntree, k_folds=k_folds,
+                             max_depth=max_depth)
+
+        # Train random forest
+        fold_rf.fit(X_train, y_train, features)
+
+        # Evaluate on test set
+        accuracy, precision, recall, f1 = fold_rf.evaluate(X_test, y_test, features)
+
+        fold_accuracies.append(accuracy)
+        fold_precisions.append(precision)
+        fold_recalls.append(recall)
+        fold_f1s.append(f1)
+
+    # Store average metrics for this ntree value
+    results['accuracy'][ntree] = np.mean(fold_accuracies)
+    results['precision'][ntree] = np.mean(fold_precisions)
+    results['recall'][ntree] = np.mean(fold_recalls)
+    results['f1'][ntree] = np.mean(fold_f1s)
+
+    print(f"  ntree = {ntree} completed - Accuracy: {results['accuracy'][ntree]:.4f}, "
+          f"Precision: {results['precision'][ntree]:.4f}, Recall: {results['recall'][ntree]:.4f}, "
+          f"F1 Score: {results['f1'][ntree]:.4f}")
+
+# Plotting results
+plt.figure(figsize=(12, 8))
+plt.plot(n_trees_list, [results['accuracy'][ntree] for ntree in n_trees_list], label='Accuracy', marker='o')
+plt.plot(n_trees_list, [results['precision'][ntree] for ntree in n_trees_list], label='Precision', marker='o')
+plt.plot(n_trees_list, [results['recall'][ntree] for ntree in n_trees_list], label='Recall', marker='o')
+plt.plot(n_trees_list, [results['f1'][ntree] for ntree in n_trees_list], label='F1 Score', marker='o')
+
+plt.xlabel('Number of Trees (ntree)')
+plt.ylabel('Score')
+plt.title('Random Forest Performance vs. Number of Trees')
 plt.legend()
+plt.grid(True)
 plt.show()
